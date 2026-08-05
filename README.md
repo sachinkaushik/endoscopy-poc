@@ -1,4 +1,4 @@
-# Endoscopy (Surgical Instrument) Demo
+# Endoscopy (Surgical Instrument) Sample App
 
 Real-time polyp detection on Intel hardware (CPU / iGPU / NPU) using **OpenVINO**,
 with a **decoupled capture / inference / display** architecture so the displayed
