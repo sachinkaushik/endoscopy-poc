@@ -46,7 +46,10 @@ X11          := -e DISPLAY=$(DISPLAY) -e XDG_RUNTIME_DIR=$(XDG_RUNTIME_DIR) -v /
 USB          := -v /dev/bus/usb:/dev/bus/usb --device-cgroup-rule='c 189:* rmw'
 
 MOUNTS       := -v $(MODELS_DIR):/models:ro -v $(VIDEOS_DIR):/videos:rw
+# CAP_SYS_NICE + rtprio ulimit: required for --cpu-* affinity and --rt-priority
+# (SCHED_FIFO) pinning; without them the app logs "Operation not permitted".
 COMMON       := --rm --name $(CONTAINER) --net=host $(DRI) $(GROUP_ARGS) $(MOUNTS) \
+                --cap-add SYS_NICE --ulimit rtprio=99 \
                 -e MODEL=$(MODEL) -e DEVICE=$(DEVICE)
 
 .PHONY: build
@@ -90,6 +93,31 @@ record: ## Write an annotated clip to $(VIDEOS_DIR)/annotated.mp4
 	docker run $(COMMON) $(IMAGE) \
 		--source file --source-arg $(VIDEO) --headless \
 		--record /videos/annotated.mp4 $(EXTRA)
+
+.PHONY: list-cameras
+list-cameras: ## List connected Basler cameras (serial + model) -> SERIAL=
+	@python3 utility.py 2>/dev/null || \
+	docker run --rm $(USB) -v $(CURDIR)/utility.py:/tmp/utility.py:ro \
+		--entrypoint python3 $(IMAGE) /tmp/utility.py
+
+.PHONY: show-cores
+show-cores: ## Show P-core / E-core CPU sets for --cpu-* pinning
+	@ALL=$$(cat /sys/devices/system/cpu/present 2>/dev/null || echo 'unknown'); \
+	PCORE=$$(cat /sys/devices/cpu_core/cpus 2>/dev/null); \
+	ECORE=$$(cat /sys/devices/cpu_atom/cpus 2>/dev/null); \
+	N=$$(nproc 2>/dev/null || echo '?'); \
+	printf '\n[cores] all CPUs        : %s  (nproc=%s)\n' "$$ALL" "$$N"; \
+	if [ -n "$$PCORE" ]; then \
+	  printf '[cores] P-cores (perf)  : %s  <-- pin --cpu-capture/--cpu-inference/--cpu-display here\n' "$$PCORE"; \
+	  printf '[cores] E-cores (effic) : %s\n' "$$ECORE"; \
+	  printf '[cores] hint: EXTRA="--cpu-capture 1 --cpu-inference 2 --cpu-display 3 --rt-priority 20"\n'; \
+	else \
+	  printf '[cores] no P/E core split detected (non-hybrid CPU or older kernel)\n'; \
+	  printf '[cores] all cores are equivalent; pick any distinct --cpu-* indices.\n'; \
+	fi; \
+	printf '\n[cores] lscpu sample (top 6 rows):\n'; \
+	lscpu -e 2>/dev/null | head -7 || lscpu | head -10; \
+	printf '\n'
 
 .PHONY: shell
 shell: ## Interactive shell in the image

@@ -20,7 +20,84 @@ Display shows **every captured frame**; inference runs on its **own thread**
 every Nth frame and publishes results to a shared slot. Displayed FPS is
 therefore independent of inference FPS — no GStreamer / VA-API in the path.
 
-## Install
+## Models & video dataset
+
+The container needs an **OpenVINO IR** (the trained model) and, for file mode, a
+**test video**, both supplied from the host via bind-mounts. The Makefile mounts
+`../models → /models` and `../videos → /videos` by default (override with
+`MODELS_DIR` / `VIDEOS_DIR`).
+
+Expected host layout (next to this repo):
+
+```
+models/yolo11n_polyp/best_openvino_model/best.xml   (+ best.bin)
+videos/polyp_test.mp4
+```
+
+This demo does **not** train — it consumes an IR produced by the
+`Surgical_Instrument` suite (YOLO11n trained on **CVC-ColonDB**). How that
+dataset and IR are created:
+
+1. Download the **CVC-ColonDB** archive from the CVC lab
+   (`https://pages.cvc.uab.es/CVC-Colon/index.php/databases/`) after accepting
+   their research-use terms.
+   *Citation: Bernal, Sánchez, Vilariño (2012), Pattern Recognition 45(9), 3166–3182.*
+2. Drop the archive (or extracted folder) into the suite's dataset input at
+   `Surgical_Instrument/datasets/CVC-ColonDB/raw/` (accepts `.zip`, `.tar`,
+   `.tar.gz`, `.tgz`).
+3. On first boot the suite auto-detects the images + masks, converts the binary
+   masks to YOLO bounding-box labels, splits 70/15/15, writes `data.yaml`, then
+   trains YOLO11n on the Intel Arc iGPU and exports to an OpenVINO IR at
+   `models/yolo11n_polyp/best_openvino_model/best.xml`.
+
+Place that resulting IR under `models/` and a test clip under `videos/` (host
+paths above) and this demo is ready to run — the presence of
+`models/yolo11n_polyp/best_openvino_model/best.xml` is all it needs.
+
+## Start the app
+
+Build once; `make` auto-detects the `render`/`video` GIDs, `/dev/dri`, the X11
+socket, and (for camera) USB passthrough.
+
+```bash
+make build
+```
+
+Discover the camera serial and CPU core layout:
+
+```bash
+make list-cameras   # prints Basler serial(s) + model -> use as SERIAL=
+make show-cores     # prints CPU topology; P-cores have the highest MAXMHZ -> --cpu-*
+```
+
+**Basler live camera** — pass the camera serial:
+
+```bash
+# With display
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU
+
+# Headless
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--headless"
+
+# With core pinning + real-time priority (the Makefile grants CAP_SYS_NICE)
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU \
+  EXTRA="--cpu-capture 1 --cpu-inference 2 --cpu-display 3 --rt-priority 20"
+
+# Headless + core pinning
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU \
+  EXTRA="--headless --cpu-capture 1 --cpu-inference 2 --cpu-display 3 --rt-priority 20"
+```
+
+**Video file** — with display (loops) vs. headless (FPS/latency logged only):
+
+```bash
+make run-file VIDEO=/videos/polyp_test.mp4 DEVICE=GPU
+make run-file VIDEO=/videos/polyp_test.mp4 DEVICE=GPU EXTRA="--headless"
+```
+
+`DEVICE` accepts `GPU | CPU | NPU`; append any extra app flag through `EXTRA`.
+
+## Run locally (without Docker)
 
 ```bash
 pip install -r requirements.txt
@@ -28,14 +105,12 @@ pip install -r requirements.txt
 pip install pypylon
 ```
 
-## Run
-
 ```bash
 # Video file (loops)
 python app.py --source file --source-arg /videos/polyp_test.mp4 --device GPU
 
 # Basler live camera (first camera; or pass a serial)
-python app.py --source basler --source-arg 40067928 --device GPU
+python app.py --source basler --source-arg <SERIAL_NUMBER> --device GPU
 
 # USB / V4L2 webcam (device index)
 python app.py --source v4l2 --source-arg 0 --device GPU
