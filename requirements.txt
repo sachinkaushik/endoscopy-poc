@@ -1,0 +1,8 @@
+# Core runtime
+openvino>=2024.0
+numpy>=1.24
+opencv-python>=4.8
+
+# Basler live camera only (not needed for --source file or --source v4l2).
+# Install separately on camera hosts:  pip install pypylon
+# pypylon>=3.0
