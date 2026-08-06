@@ -32,6 +32,7 @@ class Config:
     width: int
     height: int
     target_fps: float
+    camera_fps: float    # Basler acquisition-rate cap (0 = free-running)
     exposure_us: float | None
     gain: float | None
 
@@ -66,6 +67,9 @@ def parse_config(argv: list[str] | None = None) -> Config:
     p.add_argument("--width", type=int, default=int(_env("WIDTH", "1280")))
     p.add_argument("--height", type=int, default=int(_env("HEIGHT", "720")))
     p.add_argument("--target-fps", type=float, default=float(_env("TARGET_FPS", "60")))
+    p.add_argument("--camera-fps", type=float, default=float(_env("CAMERA_FPS", "0")),
+                   help="Basler capture-rate cap in FPS (0 = free-running). "
+                        "Set to a submultiple of the display refresh to avoid jitter.")
     p.add_argument("--exposure-us", default=_env("EXPOSURE_US", ""))
     p.add_argument("--gain", default=_env("GAIN", ""))
 
@@ -98,6 +102,7 @@ def parse_config(argv: list[str] | None = None) -> Config:
         width=a.width,
         height=a.height,
         target_fps=a.target_fps,
+        camera_fps=a.camera_fps,
         exposure_us=_opt_float(a.exposure_us),
         gain=_opt_float(a.gain),
         model=a.model,

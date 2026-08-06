@@ -95,6 +95,7 @@ class BaslerSource:
         height: int,
         exposure_us: float | None = None,
         gain: float | None = None,
+        fps_limit: float | None = None,
     ) -> None:
         from pypylon import pylon  # imported lazily so file/v4l2 users don't need it
  
@@ -117,10 +118,23 @@ class BaslerSource:
         if gain is not None:
             self._try("Gain", float(gain))
  
+        # Optional capture-rate cap (equivalent to gencamsrc frame-rate=<n>): locks
+        # the sensor to a fixed FPS so it doesn't beat against the display refresh.
+        # Node names differ across Basler models / SFNC versions, so try both.
+        if fps_limit and fps_limit > 0:
+            self._try("AcquisitionFrameRateEnable", True)
+            self._try("AcquisitionFrameRate", float(fps_limit))     # SFNC 2.x (USB3 / ace 2)
+            self._try("AcquisitionFrameRateAbs", float(fps_limit))  # SFNC 1.x (GigE / older)
+        else:
+            # 0 == free-running: actively release any cap the camera retained from
+            # a previous run (Basler keeps this across process restarts).
+            self._try("AcquisitionFrameRateEnable", False)
+
         self.width = int(self._cam.Width.GetValue())
         self.height = int(self._cam.Height.GetValue())
-        self.fps = 0.0  # free-running; effective rate reported by the app
- 
+        # Report the capped rate when set; otherwise free-running (app reports effective).
+        self.fps = float(fps_limit) if (fps_limit and fps_limit > 0) else 0.0
+
         self._conv = pylon.ImageFormatConverter()
         self._conv.OutputPixelFormat = pylon.PixelType_BGR8packed
         self._conv.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
@@ -182,5 +196,6 @@ def create_source(cfg) -> Source:  # noqa: ANN001
             height=cfg.height,
             exposure_us=cfg.exposure_us,
             gain=cfg.gain,
+            fps_limit=cfg.camera_fps,
         )
     raise ValueError(f"unknown source: {kind!r} (want file|v4l2|basler)")

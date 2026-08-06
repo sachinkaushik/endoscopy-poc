@@ -13,8 +13,8 @@
 #
 SHELL := /bin/bash
 
-IMAGE        ?= updated-endoscopy-demo:latest
-CONTAINER    ?= updated-endoscopy-demo
+IMAGE        ?= endoscopy-demo:latest
+CONTAINER    ?= endoscopy-demo
 
 # --- Host paths mounted into the container -----------------------------------
 # MODELS_DIR must contain: yolo11n_polyp/best_openvino_model/best.xml

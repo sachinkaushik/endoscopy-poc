@@ -76,6 +76,9 @@ make show-cores     # prints CPU topology; P-cores have the highest MAXMHZ -> --
 # With display
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU
 
+# Lock the sensor to the display refresh (e.g. 60 Hz) to remove cadence jitter
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--camera-fps 60"
+
 # Headless
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--headless"
 
@@ -130,6 +133,7 @@ Press **ESC** to quit.
 | `--iou` | `IOU` | `0.45` | NMS IoU |
 | `--frame-skip` | `FRAME_SKIP` | `1` | infer every Nth frame (raise to lighten GPU) |
 | `--width/--height` | `WIDTH/HEIGHT` | `1280/720` | capture resolution |
+| `--camera-fps` | `CAMERA_FPS` | `0` | Basler capture-rate cap (0 = free-running); set to a submultiple of the display refresh to remove cadence jitter |
 | `--headless` | `HEADLESS` | off | no window (benchmark / server) |
 | `--record` | `RECORD` | — | write annotated `.mp4` |
 | `--display-scale` | `DISPLAY_SCALE` | `1.0` | window scale |
