@@ -36,7 +36,7 @@ USER root
 RUN find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r grep -lE 'intel\.com' 2>/dev/null | xargs -r rm -f \
     && apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 libusb-1.0-0 libsm6 libice6 \
-        libglfw3 libglx-mesa0 libgl1-mesa-dri \
+        libglfw3 libglx-mesa0 libgl1-mesa-dri libopengl0 libglx0 libglvnd0 \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir opencv-python glfw PyOpenGL
  

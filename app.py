@@ -231,6 +231,16 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
         writer.release()
     if presenter is not None:
         presenter.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    cfg = parse_config(argv)
+    log.info("config: %s", cfg)
+
+    signal.signal(signal.SIGTERM, lambda *_: shutdown.set())
+    signal.signal(signal.SIGINT, lambda *_: shutdown.set())
+
+    det = Detector(cfg.model, device=cfg.device, threshold=cfg.threshold, iou_threshold=cfg.iou)
     src = create_source(cfg)
     log.info("source: %s %dx%d fps=%.1f live=%s", src.name, src.width, src.height, src.fps, src.is_live)
  

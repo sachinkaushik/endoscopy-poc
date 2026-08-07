@@ -115,6 +115,9 @@ make show-cores     # prints CPU topology; P-cores have the highest MAXMHZ -> --
 # With display
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU
 
+# GL vsync-locked display + sensor capped to 60 fps
+make run-camera SERIAL=40067928 DEVICE=GPU EXTRA="--presenter gl --camera-fps 60"
+
 # Lock the sensor to the display refresh (e.g. 60 Hz) to remove cadence jitter
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--camera-fps 60"
 
