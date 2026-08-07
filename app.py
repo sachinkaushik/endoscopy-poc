@@ -8,9 +8,11 @@ Architecture (their proven design, cleaned):
                       overlaid, so displayed FPS is independent of inference FPS.
  
 Removed vs the original reference: the GLX/ctypes VSync thread and the
-software-trigger-per-vblank coupling (only needed for sub-frame vsync latency,
-not for the 30 ms target). Core pinning is retained but fully configurable and
-off by default.
+software-trigger-per-vblank coupling. The display can still be locked to the
+monitor's refresh (portable, presentation-only) via the OpenGL presenter in
+``display.py`` (``--presenter gl``/``auto``); inference stays decoupled and only
+box coordinates cross to the display. Core pinning is retained but fully
+configurable and off by default.
 """
 from __future__ import annotations
  
@@ -36,6 +38,7 @@ import numpy as np
  
 from config import Config, parse_config
 from detector import Box, Detector
+from display import create_presenter
 from sources import Source, create_source
  
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s: %(message)s")
@@ -166,21 +169,36 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
         writer = cv2.VideoWriter(cfg.record_path, fourcc, fps, (src.width, src.height))
         log.info("recording annotated output -> %s", cfg.record_path)
  
-    win = "Endoscopy Demo"
-    if not cfg.headless:
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win, int(src.width * cfg.display_scale), int(src.height * cfg.display_scale))
- 
+    presenter = create_presenter(cfg.headless, cfg.presenter, src.width, src.height, cfg.display_scale)
+    vsync = getattr(presenter, "vsync", False)
+
     ttl_ns = cfg.detection_ttl_ms * 1_000_000
     disp_rate = Rate()
     last_log = time.monotonic()
- 
+    last_raw: np.ndarray | None = None
+
     while not shutdown.is_set():
+        # Drain the queue to the newest frame (newest-frame-wins).
+        new = None
         try:
-            frame = display_q.get(timeout=0.1)
+            while True:
+                new = display_q.get_nowait()
         except queue.Empty:
+            pass
+        if new is not None:
+            last_raw = new
+
+        if last_raw is None:
+            time.sleep(0.005)  # nothing captured yet
             continue
- 
+        # Only a vsync presenter re-presents a held frame every vblank (to keep
+        # cadence). Headless / cv2 advance solely on new frames to avoid busy-loop
+        # spinning and duplicate recorded frames.
+        if new is None and not vsync:
+            time.sleep(0.002)
+            continue
+
+        frame = last_raw.copy()
         boxes, ts_ns = latest.get()
         fresh = boxes and (time.perf_counter_ns() - ts_ns) < ttl_ns
         if fresh:
@@ -188,41 +206,31 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
                 cv2.rectangle(frame, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (0, 255, 0), 2)
                 cv2.putText(frame, f"{b.score:.2f}", (int(b.x1), max(14, int(b.y1) - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
- 
+
         disp_rate.tick()
         hud = (f"disp {disp_rate.fps:4.1f}  cap {cap_rate.fps:4.1f}  "
                f"infer {inf_rate.fps:4.1f} ({inf_rate.latency_ms:4.1f}ms)  "
                f"det {len(boxes) if fresh else 0}")
         cv2.putText(frame, hud, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, hud, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
- 
-        if writer is not None:
+
+        # Record only genuinely new frames so the file stays at capture rate.
+        if writer is not None and new is not None:
             writer.write(frame)
-        if not cfg.headless:
-            cv2.imshow(win, frame)
-            if (cv2.waitKey(1) & 0xFF) == 27:  # ESC
+        if presenter is not None:
+            if not presenter.present(frame):  # GL: blocks until vblank; ESC/close -> False
                 shutdown.set()
- 
+
         now = time.monotonic()
         if now - last_log >= 5.0:
             log.info("FPS display=%.1f capture=%.1f inference=%.1f latency=%.1fms",
                      disp_rate.fps, cap_rate.fps, inf_rate.fps, inf_rate.latency_ms)
             last_log = now
- 
+
     if writer is not None:
         writer.release()
-    if not cfg.headless:
-        cv2.destroyAllWindows()
- 
- 
-def main(argv: list[str] | None = None) -> int:
-    cfg = parse_config(argv)
-    log.info("config: %s", cfg)
- 
-    signal.signal(signal.SIGTERM, lambda *_: shutdown.set())
-    signal.signal(signal.SIGINT, lambda *_: shutdown.set())
- 
-    det = Detector(cfg.model, device=cfg.device, threshold=cfg.threshold, iou_threshold=cfg.iou)
+    if presenter is not None:
+        presenter.close()
     src = create_source(cfg)
     log.info("source: %s %dx%d fps=%.1f live=%s", src.name, src.width, src.height, src.fps, src.is_live)
  

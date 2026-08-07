@@ -45,6 +45,7 @@ class Config:
 
     # display / output
     headless: bool
+    presenter: str       # auto | gl | cv2  (gl = vsync-locked OpenGL present)
     display_scale: float
     record_path: str | None
     detection_ttl_ms: int
@@ -83,6 +84,10 @@ def parse_config(argv: list[str] | None = None) -> Config:
 
     # display / output
     p.add_argument("--headless", action="store_true", default=_env("HEADLESS", "0") != "0")
+    p.add_argument("--presenter", default=_env("PRESENTER", "auto").lower(),
+                   choices=["auto", "gl", "cv2"],
+                   help="display backend: auto (GL vsync, else cv2) | gl (vsync-locked "
+                        "OpenGL) | cv2 (legacy imshow, no vsync)")
     p.add_argument("--display-scale", type=float, default=float(_env("DISPLAY_SCALE", "1.0")))
     p.add_argument("--record", default=_env("RECORD", ""), help="path to write annotated .mp4/.avi")
     p.add_argument("--detection-ttl-ms", type=int, default=int(_env("DETECTION_TTL_MS", "200")))
@@ -111,6 +116,7 @@ def parse_config(argv: list[str] | None = None) -> Config:
         iou=a.iou,
         frame_skip=max(1, a.frame_skip),
         headless=a.headless,
+        presenter=a.presenter,
         display_scale=a.display_scale,
         record_path=a.record or None,
         detection_ttl_ms=a.detection_ttl_ms,

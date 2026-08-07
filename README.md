@@ -8,7 +8,7 @@ This is a cleaned rewrite of the original `Endoscopy-Demo` reference:
 
 | Original | This version |
 |---|---|
-| GLX/`ctypes` VSync thread (X11-only) | **removed** (not needed for the 30 ms target) |
+| GLX/`ctypes` VSync thread driving the **camera** | display-only, portable **vsync presenter** (OpenGL), camera stays free-running |
 | Software-trigger-per-vblank camera | **free-running** `LatestImageOnly` grab |
 | Hardcoded CPU pinning (`cpu=2/4/6/7`) | **configurable, off by default** |
 | ultralytics + hand-wired OpenVINO | **pure OpenVINO** (version-stable) |
@@ -19,6 +19,45 @@ This is a cleaned rewrite of the original `Endoscopy-Demo` reference:
 Display shows **every captured frame**; inference runs on its **own thread**
 every Nth frame and publishes results to a shared slot. Displayed FPS is
 therefore independent of inference FPS — no GStreamer / VA-API in the path.
+
+## Display synchronization (vsync)
+
+Capture and inference are decoupled; the **display** stage can additionally be
+locked to the monitor's refresh so presentation cadence is deterministic (no
+beat between the camera rate and the panel refresh). This replaces the original
+GLX/ctypes vsync thread with a portable, **presentation-only** OpenGL path — the
+camera stays free-running (`LatestImageOnly`) and inference still crosses only
+bounding-box coordinates to the display.
+
+Select the backend with `--presenter` (env `PRESENTER`):
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | Use the OpenGL vsync presenter; fall back to `cv2` if GL is unavailable, then to headless if there is no display at all |
+| `gl` | OpenGL window with `swap_interval(1)` — buffer swap blocks on the vertical blank, so display FPS locks to the refresh (e.g. flat 60.0). Falls back to `cv2` with a warning if GL can't start |
+| `cv2` | Legacy `cv2.imshow` (no vsync lock) |
+
+Pair it with `--camera-fps` set to the refresh (or a submultiple) for the
+steadiest result, e.g. a 60 Hz panel:
+
+```bash
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--presenter gl --camera-fps 60"
+```
+
+**Dependencies (optional, only for `--presenter gl`/`auto`):**
+
+- Python: `glfw`, `PyOpenGL` — `pip install glfw PyOpenGL`
+- System: `libglfw3` + an OpenGL/GLX runtime (`libgl1 libglx-mesa0 libgl1-mesa-dri`),
+  a reachable display (X11 socket + `DISPLAY`, or Wayland), and the GPU render
+  node `/dev/dri` (the Makefile already passes X11 + `/dev/dri` through).
+
+The Docker image bundles all of the above. They are **lazily imported**, so
+`--headless`, `--source file`, and CI runs need none of them.
+
+**Fallback / headless behavior:** if the GL libraries are missing, `glfwInit()`
+or context creation fails (no display server, unsupported GLX/EGL), or the panel
+isn't reachable, the app logs the reason and degrades `gl → cv2 → headless`
+instead of crashing. `--headless` skips the display entirely (log/record only).
 
 ## Models & video dataset
 
@@ -135,6 +174,7 @@ Press **ESC** to quit.
 | `--width/--height` | `WIDTH/HEIGHT` | `1280/720` | capture resolution |
 | `--camera-fps` | `CAMERA_FPS` | `0` | Basler capture-rate cap (0 = free-running); set to a submultiple of the display refresh to remove cadence jitter |
 | `--headless` | `HEADLESS` | off | no window (benchmark / server) |
+| `--presenter` | `PRESENTER` | `auto` | display backend: `auto` (GL vsync, else cv2) \| `gl` (vsync-locked) \| `cv2` (legacy imshow) |
 | `--record` | `RECORD` | — | write annotated `.mp4` |
 | `--display-scale` | `DISPLAY_SCALE` | `1.0` | window scale |
 | `--detection-ttl-ms` | `DETECTION_TTL_MS` | `200` | how long a detection stays overlaid |
@@ -177,6 +217,7 @@ updated-endoscopy-demo/
 ├── app.py           # threads (capture / inference / display), HUD, record
 ├── detector.py      # OpenVINO IR load, letterbox preprocess, YOLO decode + NMS
 ├── sources.py       # FileSource / V4L2Source / BaslerSource + factory
+├── display.py       # vsync OpenGL presenter + cv2 fallback + factory
 ├── config.py        # CLI + env configuration
 ├── requirements.txt
 └── README.md
