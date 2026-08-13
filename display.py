@@ -89,7 +89,7 @@ class GLPresenter:
 
     vsync = True
 
-    def __init__(self, width: int, height: int, scale: float) -> None:
+    def __init__(self, width: int, height: int, scale: float, fullscreen: bool = False) -> None:
         import glfw  # lazy: only needed when a GL window is actually created
         from OpenGL import GL
 
@@ -106,13 +106,29 @@ class GLPresenter:
             # glTexCoord) is enough for a textured quad and avoids shader setup.
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 2)
             glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
-            win_w, win_h = int(width * scale), int(height * scale)
-            self._win = glfw.create_window(win_w, win_h, WINDOW_TITLE, None, None)
+
+            monitor = None
+            if fullscreen:
+                # A real fullscreen window is unredirected by the compositor (direct
+                # scanout), which removes the 1-2 frames of compositor buffering that
+                # dominate desktop photon-to-pixel latency.
+                monitor = glfw.get_primary_monitor()
+                mode = glfw.get_video_mode(monitor)
+                win_w, win_h = mode.size.width, mode.size.height
+            else:
+                win_w, win_h = int(width * scale), int(height * scale)
+            self._win = glfw.create_window(win_w, win_h, WINDOW_TITLE, monitor, None)
             if not self._win:
                 raise RuntimeError("glfwCreateWindow() failed (no GLX/EGL surface?)")
 
             glfw.make_context_current(self._win)
-            glfw.swap_interval(1)  # <-- VSYNC: swap_buffers() now blocks on vblank
+            if fullscreen:
+                # Immediate present (no vblank wait) = lowest latency; the loop then
+                # advances only on new frames. Trade-off: possible tearing.
+                glfw.swap_interval(0)
+                self.vsync = False  # instance override: don't re-present held frames
+            else:
+                glfw.swap_interval(1)  # <-- VSYNC: swap_buffers() now blocks on vblank
             glfw.set_key_callback(self._win, self._on_key)
 
             GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)  # BGR rows aren't 4-aligned
@@ -172,7 +188,7 @@ class GLPresenter:
 
 
 def create_presenter(headless: bool, presenter: str, width: int, height: int,
-                     scale: float) -> Presenter | None:
+                     scale: float, fullscreen: bool = False) -> Presenter | None:
     """Pick a presenter with graceful fallback. Returns None for headless / when
     no display is available at all."""
     if headless:
@@ -182,8 +198,9 @@ def create_presenter(headless: bool, presenter: str, width: int, height: int,
 
     if choice in ("auto", "gl"):
         try:
-            p = GLPresenter(width, height, scale)
-            log.info("display: OpenGL vsync-locked presenter (GLFW swap_interval=1)")
+            p = GLPresenter(width, height, scale, fullscreen=fullscreen)
+            log.info("display: OpenGL presenter (%s)",
+                     "fullscreen direct-scanout, immediate" if fullscreen else "vsync-locked")
             return p
         except Exception as exc:  # noqa: BLE001
             level = log.warning if choice == "gl" else log.info

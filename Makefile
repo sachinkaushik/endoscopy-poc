@@ -6,6 +6,7 @@
 #   make build
 #   make run-file      VIDEO=/abs/path/polyp_test.mp4
 #   make run-camera    SERIAL=40067928
+#   make run-camera-lowlatency SERIAL=40067928   # vblank-triggered, latency CSV
 #   make run-webcam    DEVICE_INDEX=0
 #   make bench         VIDEO=/abs/path/polyp_test.mp4      # headless FPS
 #   make record        VIDEO=/abs/path/polyp_test.mp4
@@ -29,6 +30,10 @@ FRAME_SKIP   ?= 1
 THRESHOLD    ?= 0.5
 SERIAL       ?=                # Basler serial ("" = first camera)
 DEVICE_INDEX ?= 0              # V4L2 webcam index
+CAMERA_TRIGGER ?= software     # off | software | vsync (software = low-latency, no vblank clock)
+VSYNC_DIVISOR  ?= 2            # trigger every Nth vblank (vsync mode only)
+EXPOSURE_US    ?= 1000        # fixed exposure in us (lower = less latency + darker; "" = 2000 default)
+FULLSCREEN     ?= 1           # 1 = fullscreen GL direct-scanout (bypass compositor); 0 = windowed
 EXTRA        ?=                # extra flags, e.g. EXTRA="--frame-skip 2"
 
 # Proxy passthrough for build (optional)
@@ -74,6 +79,15 @@ run-file: _xhost ## Run on a video file (loops), with display
 run-camera: _xhost ## Run on a Basler live camera, with display
 	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
 		--source basler --source-arg "$(SERIAL)" \
+		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
+
+.PHONY: run-camera-lowlatency
+run-camera-lowlatency: _xhost ## Basler camera, low-latency capture + fullscreen + latency CSV
+	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
+		--source basler --source-arg "$(SERIAL)" \
+		--camera-trigger $(CAMERA_TRIGGER) --vsync-divisor $(VSYNC_DIVISOR) \
+		$(if $(EXPOSURE_US),--exposure-us $(EXPOSURE_US)) \
+		$(if $(filter-out 0,$(FULLSCREEN)),--presenter gl --fullscreen) --latency-trace \
 		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
 
 .PHONY: run-webcam
