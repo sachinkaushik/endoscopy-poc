@@ -96,10 +96,12 @@ class BaslerSource:
         exposure_us: float | None = None,
         gain: float | None = None,
         fps_limit: float | None = None,
+        trigger: str = "off",
     ) -> None:
         from pypylon import pylon  # imported lazily so file/v4l2 users don't need it
- 
+
         self._pylon = pylon
+        self._trigger = trigger  # off | software | vsync (vsync = software-trigger, vblank-paced)
         tl = pylon.TlFactory.GetInstance()
         if serial:
             di = pylon.DeviceInfo()
@@ -111,12 +113,27 @@ class BaslerSource:
         self.name = f"basler:{self._cam.GetDeviceInfo().GetSerialNumber()}"
  
         self._try_set_size(width, height)
-        self._try("ExposureAuto", "Off")
-        self._try("GainAuto", "Off")
+        # Only override exposure/gain when explicitly requested. A short exposure cuts
+        # latency + motion blur but darkens the image; endoscopy needs adequate,
+        # clinically-validated illumination, so we do NOT force a fixed value here —
+        # left untouched, the camera keeps the operator's configured exposure.
         if exposure_us is not None:
+            self._try("ExposureAuto", "Off")
             self._try("ExposureTime", float(exposure_us))
         if gain is not None:
+            self._try("GainAuto", "Off")
             self._try("Gain", float(gain))
+
+        # Software trigger: expose one frame per read() instead of free-running, so
+        # the frame is captured just-in-time (optionally vblank-paced by the caller).
+        # This is the reference's photon-to-pixel latency mechanism.
+        self._triggered = trigger in ("software", "vsync")
+        if self._triggered:
+            self._try("TriggerSelector", "FrameStart")
+            self._try("TriggerMode", "On")
+            self._try("TriggerSource", "Software")
+        else:
+            self._try("TriggerMode", "Off")
  
         # Optional capture-rate cap (equivalent to gencamsrc frame-rate=<n>): locks
         # the sensor to a fixed FPS so it doesn't beat against the display refresh.
@@ -138,7 +155,10 @@ class BaslerSource:
         self._conv = pylon.ImageFormatConverter()
         self._conv.OutputPixelFormat = pylon.PixelType_BGR8packed
         self._conv.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
-        self._cam.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+        # LatestImageOnly for free-run; triggered mode grabs exactly what it fires.
+        strategy = (pylon.GrabStrategy_OneByOne if self._triggered
+                    else pylon.GrabStrategy_LatestImageOnly)
+        self._cam.StartGrabbing(strategy)
  
     def _try(self, node: str, value) -> None:  # noqa: ANN001
         try:
@@ -164,6 +184,10 @@ class BaslerSource:
         # TimeoutHandling_Return (not ThrowException): a GenICam C++ exception
         # crossing back into Python is a known trigger for the glibc
         # "longjmp causes uninitialized stack frame" abort. Return None instead.
+        if self._triggered:
+            if not self._cam.WaitForFrameTriggerReady(1000, self._pylon.TimeoutHandling_Return):
+                return None
+            self._cam.ExecuteSoftwareTrigger()
         grab = self._cam.RetrieveResult(5000, self._pylon.TimeoutHandling_Return)
         if grab is None:
             return None
@@ -190,6 +214,9 @@ def create_source(cfg) -> Source:  # noqa: ANN001
     if kind == "v4l2":
         return V4L2Source(cfg.source_arg or 0, cfg.width, cfg.height, cfg.target_fps)
     if kind == "basler":
+        # Exposure is left as the camera has it unless --exposure-us is given, so
+        # clinical illumination isn't silently changed. Lower it explicitly to trade
+        # brightness for less latency/motion blur once validated.
         return BaslerSource(
             serial=cfg.source_arg or None,
             width=cfg.width,
@@ -197,5 +224,6 @@ def create_source(cfg) -> Source:  # noqa: ANN001
             exposure_us=cfg.exposure_us,
             gain=cfg.gain,
             fps_limit=cfg.camera_fps,
+            trigger=cfg.camera_trigger,
         )
     raise ValueError(f"unknown source: {kind!r} (want file|v4l2|basler)")

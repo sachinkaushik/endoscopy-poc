@@ -8,8 +8,8 @@ This is a cleaned rewrite of the original `Endoscopy-Demo` reference:
 
 | Original | This version |
 |---|---|
-| GLX/`ctypes` VSync thread driving the **camera** | display-only, portable **vsync presenter** (OpenGL), camera stays free-running |
-| Software-trigger-per-vblank camera | **free-running** `LatestImageOnly` grab |
+| GLX/`ctypes` VSync thread driving the **camera** | **present-completion trigger** (optional): the fullscreen GL present's own vblank drives capture — same phase-lock, one path, no separate GLFW clock |
+| Software-trigger-per-vblank camera | **free-running by default**, with optional `software` / `vsync` trigger modes for low latency |
 | Hardcoded CPU pinning (`cpu=2/4/6/7`) | **configurable, off by default** |
 | ultralytics + hand-wired OpenVINO | **pure OpenVINO** (version-stable) |
 | Basler only | **Basler, USB/V4L2, or video file** |
@@ -116,7 +116,7 @@ make show-cores     # prints CPU topology; P-cores have the highest MAXMHZ -> --
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU
 
 # GL vsync-locked display + sensor capped to 60 fps
-make run-camera SERIAL=40067928 DEVICE=GPU EXTRA="--presenter gl --camera-fps 60"
+make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--presenter gl --camera-fps 60"
 
 # Lock the sensor to the display refresh (e.g. 60 Hz) to remove cadence jitter
 make run-camera SERIAL=<SERIAL_NUMBER> DEVICE=GPU EXTRA="--camera-fps 60"
@@ -141,6 +141,41 @@ make run-file VIDEO=/videos/polyp_test.mp4 DEVICE=GPU EXTRA="--headless"
 ```
 
 `DEVICE` accepts `GPU | CPU | NPU`; append any extra app flag through `EXTRA`.
+
+## Low-latency mode
+
+For the lowest photon-to-pixel latency, enable the low-latency profile with one
+switch on the same `run-camera` target:
+
+```bash
+# software trigger (expose on demand) + fullscreen direct-scanout + latency CSV
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1
+
+# phase-locked capture: the fullscreen present's vblank drives the camera trigger
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1 CAMERA_TRIGGER=vsync
+
+# low-latency but windowed (compositor back in the path)
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1 FULLSCREEN=0
+```
+
+`LOWLATENCY=1` sets `CAMERA_TRIGGER=software`, `FULLSCREEN=1`, `LATENCY_TRACE=1`;
+override any of them individually.
+
+| Knob | Values | Effect |
+|---|---|---|
+| `CAMERA_TRIGGER` | `off` \| `software` \| `vsync` | `off` = free-run; `software` = expose just-in-time per frame; `vsync` = phase-lock capture to the display vblank (present-completion) |
+| `FULLSCREEN` | `1` \| `0` | fullscreen GL bypasses the compositor (direct scanout, ~1-2 fewer frames) |
+| `LATENCY_TRACE` | `1` \| `0` | print per-stage CSV: `trigger_to_grab, grab_to_display, trigger_to_display, infer_ms, ...` |
+| `VSYNC_DIVISOR` | `N` | vsync: capture every Nth vblank (1 = every refresh; raise only on >60 Hz panels) |
+| `EXPOSURE_US` | µs | shorter = less latency/motion-blur but darker — validate illumination |
+
+**Reality check:** on a **60 Hz** monitor, photon-to-pixel is physically floored
+at ~one refresh (~16 ms); fullscreen direct-scanout removes the compositor's 1-2
+frames but can't beat the panel. Single-digit ms needs a **144-240 Hz+ low-lag**
+panel with the compositor off. The CSV `trigger_to_display_ms` is a *relative*
+internal metric (it ends at frame hand-off and excludes present->GPU->scanout +
+exposure), so it reads lower than an Arduino photon-to-pixel rig — use it for
+before/after comparison, not as an absolute figure.
 
 ## Run locally (without Docker)
 
@@ -178,11 +213,15 @@ Press **ESC** to quit.
 | `--camera-fps` | `CAMERA_FPS` | `0` | Basler capture-rate cap (0 = free-running); set to a submultiple of the display refresh to remove cadence jitter |
 | `--headless` | `HEADLESS` | off | no window (benchmark / server) |
 | `--presenter` | `PRESENTER` | `auto` | display backend: `auto` (GL vsync, else cv2) \| `gl` (vsync-locked) \| `cv2` (legacy imshow) |
+| `--fullscreen` | `FULLSCREEN` | off | GL fullscreen direct-scanout (bypass compositor) |
+| `--camera-trigger` | `CAMERA_TRIGGER` | `off` | `off` (free-run) \| `software` (expose per frame) \| `vsync` (phase-lock to display) |
+| `--vsync-divisor` | `VSYNC_DIVISOR` | `1` | vsync: capture every Nth vblank |
+| `--latency-trace` | `LATENCY_TRACE` | off | print per-stage latency CSV |
 | `--record` | `RECORD` | — | write annotated `.mp4` |
 | `--display-scale` | `DISPLAY_SCALE` | `1.0` | window scale |
 | `--detection-ttl-ms` | `DETECTION_TTL_MS` | `200` | how long a detection stays overlaid |
 | `--no-loop` | `LOOP=0` | loop on | stop file at EOF instead of looping |
-| `--exposure-us` / `--gain` | `EXPOSURE_US`/`GAIN` | auto | Basler manual exposure/gain |
+| `--exposure-us` / `--gain` | `EXPOSURE_US`/`GAIN` | camera as-is | Basler manual exposure/gain (unset = keep the camera's current value) |
 
 ### Optional core pinning (off by default)
 
