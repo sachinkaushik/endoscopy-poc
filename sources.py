@@ -113,11 +113,15 @@ class BaslerSource:
         self.name = f"basler:{self._cam.GetDeviceInfo().GetSerialNumber()}"
  
         self._try_set_size(width, height)
-        self._try("ExposureAuto", "Off")
-        self._try("GainAuto", "Off")
+        # Only override exposure/gain when explicitly requested. A short exposure cuts
+        # latency + motion blur but darkens the image; endoscopy needs adequate,
+        # clinically-validated illumination, so we do NOT force a fixed value here —
+        # left untouched, the camera keeps the operator's configured exposure.
         if exposure_us is not None:
+            self._try("ExposureAuto", "Off")
             self._try("ExposureTime", float(exposure_us))
         if gain is not None:
+            self._try("GainAuto", "Off")
             self._try("Gain", float(gain))
 
         # Software trigger: expose one frame per read() instead of free-running, so
@@ -210,16 +214,14 @@ def create_source(cfg) -> Source:  # noqa: ANN001
     if kind == "v4l2":
         return V4L2Source(cfg.source_arg or 0, cfg.width, cfg.height, cfg.target_fps)
     if kind == "basler":
-        # A short fixed exposure is essential for low latency; default to the
-        # reference's 2000us when triggering and none was supplied.
-        exposure = cfg.exposure_us
-        if exposure is None and cfg.camera_trigger != "off":
-            exposure = 2000.0
+        # Exposure is left as the camera has it unless --exposure-us is given, so
+        # clinical illumination isn't silently changed. Lower it explicitly to trade
+        # brightness for less latency/motion blur once validated.
         return BaslerSource(
             serial=cfg.source_arg or None,
             width=cfg.width,
             height=cfg.height,
-            exposure_us=exposure,
+            exposure_us=cfg.exposure_us,
             gain=cfg.gain,
             fps_limit=cfg.camera_fps,
             trigger=cfg.camera_trigger,

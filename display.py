@@ -89,7 +89,8 @@ class GLPresenter:
 
     vsync = True
 
-    def __init__(self, width: int, height: int, scale: float, fullscreen: bool = False) -> None:
+    def __init__(self, width: int, height: int, scale: float, fullscreen: bool = False,
+                 vsync_lock: bool = True) -> None:
         import glfw  # lazy: only needed when a GL window is actually created
         from OpenGL import GL
 
@@ -122,13 +123,14 @@ class GLPresenter:
                 raise RuntimeError("glfwCreateWindow() failed (no GLX/EGL surface?)")
 
             glfw.make_context_current(self._win)
-            if fullscreen:
+            if vsync_lock:
+                glfw.swap_interval(1)   # swap_buffers() blocks on vblank (phase-lock)
+                self.vsync = True
+            else:
                 # Immediate present (no vblank wait) = lowest latency; the loop then
                 # advances only on new frames. Trade-off: possible tearing.
                 glfw.swap_interval(0)
                 self.vsync = False  # instance override: don't re-present held frames
-            else:
-                glfw.swap_interval(1)  # <-- VSYNC: swap_buffers() now blocks on vblank
             glfw.set_key_callback(self._win, self._on_key)
 
             GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)  # BGR rows aren't 4-aligned
@@ -188,7 +190,7 @@ class GLPresenter:
 
 
 def create_presenter(headless: bool, presenter: str, width: int, height: int,
-                     scale: float, fullscreen: bool = False) -> Presenter | None:
+                     scale: float, fullscreen: bool = False, vsync_lock: bool = True) -> Presenter | None:
     """Pick a presenter with graceful fallback. Returns None for headless / when
     no display is available at all."""
     if headless:
@@ -198,9 +200,10 @@ def create_presenter(headless: bool, presenter: str, width: int, height: int,
 
     if choice in ("auto", "gl"):
         try:
-            p = GLPresenter(width, height, scale, fullscreen=fullscreen)
-            log.info("display: OpenGL presenter (%s)",
-                     "fullscreen direct-scanout, immediate" if fullscreen else "vsync-locked")
+            p = GLPresenter(width, height, scale, fullscreen=fullscreen, vsync_lock=vsync_lock)
+            mode = "fullscreen direct-scanout" if fullscreen else "windowed"
+            log.info("display: OpenGL presenter (%s, %s)",
+                     mode, "vsync-locked" if vsync_lock else "immediate")
             return p
         except Exception as exc:  # noqa: BLE001
             level = log.warning if choice == "gl" else log.info

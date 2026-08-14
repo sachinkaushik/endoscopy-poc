@@ -81,8 +81,10 @@ def parse_config(argv: list[str] | None = None) -> Config:
                         "software (expose on demand per captured frame) | vsync "
                         "(software-trigger locked to the monitor vblank via GLX_OML). "
                         "vsync/software minimise photon-to-pixel latency.")
-    p.add_argument("--vsync-divisor", type=int, default=int(_env("VSYNC_DIVISOR", "2")),
-                   help="vsync trigger: fire every Nth vblank (2 = half the refresh rate).")
+    p.add_argument("--vsync-divisor", type=int, default=int(_env("VSYNC_DIVISOR", "1")),
+                   help="vsync trigger: capture every Nth vblank (1 = every refresh; "
+                        "raise to 2 only on high-refresh panels if the camera can't keep up). "
+                        "Default 1 — on a 60Hz display, 2 would drop capture to 30fps.")
     p.add_argument("--exposure-us", default=_env("EXPOSURE_US", ""))
     p.add_argument("--gain", default=_env("GAIN", ""))
 

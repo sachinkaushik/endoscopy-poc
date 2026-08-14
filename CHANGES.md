@@ -33,14 +33,17 @@ end-to-end latency.
 
 ## 3. Changes made
 
-### 3.1 New file: `vsync.py`
-- `VSyncClock`: ports the reference `vsync_loop` as a reusable class.
-- Runs a small GLFW window and uses `GLX_OML_sync_control` (`glXWaitForMscOML`) to
-  publish a vblank counter + perf-clock tick via a condition variable.
-- Picks the highest-refresh monitor; window is **visible** (a hidden/unmapped window
-  receives no vblank events, which would stall the clock).
-- Graceful: if GLFW/GLX is unavailable, `start()` returns `False` and the app falls
-  back to free-running / on-demand capture.
+### 3.1 Phase-lock via present-completion trigger (`app.py`)
+- `PresentSignal`: a present-completion tick. The **fullscreen, vsync-locked GL
+  presenter** bumps a sequence right after `swap_buffers()` returns from the vblank;
+  the capture thread waits on it and fires the software trigger — so exposure is
+  phase-locked to the **real scanout, in the same direct-scanout path**.
+- This replaces the earlier separate `VSyncClock` (its own GLFW context) + cv2
+  detour, which put the compositor back in the present path. One path now does both
+  the direct-scanout present and the capture timing.
+- Bootstrap/robustness: capture waits with a 0.1 s timeout, so it self-primes at
+  startup and keeps running if presents ever stall.
+- `--vsync-divisor` still supported (capture every Nth vblank), default **1**.
 
 ### 3.2 `sources.py` — `BaslerSource` trigger modes
 - New `trigger` parameter: `off | software | vsync`.
@@ -48,73 +51,77 @@ end-to-end latency.
   - `software` / `vsync` — `TriggerMode=On`, `TriggerSource=Software`; each `read()`
     does `WaitForFrameTriggerReady` + `ExecuteSoftwareTrigger` + `RetrieveResult`
     (`GrabStrategy_OneByOne`), so the frame is exposed **on demand / just-in-time**.
-- Fixed short-exposure default (2000 µs) applied automatically when triggering and no
-  exposure was supplied.
+- **Exposure is left as the camera has it** unless `--exposure-us` is given. We no
+  longer silently force 2000 µs — endoscopy illumination must be clinically
+  validated, so lowering exposure (less latency/motion-blur, darker image) is now an
+  explicit, opt-in choice.
 
-### 3.3 `config.py` — new flags / env vars
+### 3.3 `display.py` — fullscreen presenter (immediate **or** vblank-locked)
+- `GLPresenter(fullscreen=..., vsync_lock=...)`:
+  - `fullscreen` → real fullscreen window, unredirected by the compositor
+    (**direct scanout**), removing the 1–2 frames of compositor buffering.
+  - `vsync_lock=True` → `swap_interval(1)` (blocks on vblank; drives the
+    present-completion trigger). `vsync_lock=False` → `swap_interval(0)` (immediate,
+    lowest latency; used by free-run + fullscreen).
+- `create_presenter(..., fullscreen, vsync_lock)` threads both through.
+
+### 3.4 `app.py` display / capture
+- `Captured` packet carries per-frame `t_trigger_ns` / `t_grab_ns` for the CSV.
+- `display_loop`:
+  - Chooses `vsync_lock = (camera_trigger == "vsync") or (not fullscreen)` so vsync
+    mode is vblank-locked while software+fullscreen stays immediate.
+  - Emits per-frame CSV:
+    `clock_time, trigger_to_grab_ms, grab_to_display_ms, trigger_to_display_ms, infer_ms, disp_fps, cap_fps`.
+  - **Annotate-once**: held frames re-present a cached drawn buffer (no copy/redraw
+    per idle loop). Notifies `PresentSignal` after each present.
+- `main`: in vsync mode forces `--presenter gl` (cv2 can't vblank-lock) and warns if
+  `--fullscreen` is off.
+
+### 3.5 `config.py` — flags / env vars
 | Flag | Env | Default | Purpose |
 |---|---|---|---|
 | `--camera-trigger {off,software,vsync}` | `CAMERA_TRIGGER` | `off` | capture mode |
-| `--vsync-divisor N` | `VSYNC_DIVISOR` | `2` | trigger every Nth vblank (vsync mode) |
-| `--latency-trace` | `LATENCY_TRACE` | off | emit per-stage photon-to-pixel CSV |
+| `--vsync-divisor N` | `VSYNC_DIVISOR` | `1` | capture every Nth vblank (1 = every refresh) |
 | `--fullscreen` | `FULLSCREEN` | off | GL fullscreen direct-scanout (bypass compositor) |
+| `--latency-trace` | `LATENCY_TRACE` | off | emit per-stage CSV |
 
-### 3.4 `app.py`
-- `Captured` packet carries per-frame `t_trigger_ns` / `t_grab_ns` through the queues.
-- `capture_loop`:
-  - In `vsync` mode, waits on `VSyncClock` and triggers in lock-step with the vblank
-    (`counter % divisor`).
-  - **Safety fallback**: if the vblank clock does not advance (compositor/driver
-    without working `GLX_OML`), it is disabled after ~0.75 s and capture continues at
-    full rate via on-demand trigger — no freeze, no 2 fps limp.
-- `inference_loop` / `display_loop`: unwrap `Captured.image`.
-- `display_loop`:
-  - Emits per-frame CSV:
-    `clock_time, trigger_to_grab_ms, grab_to_display_ms, trigger_to_display_ms, infer_ms, disp_fps, cap_fps`.
-  - **Annotate-once**: held frames re-present a cached drawn buffer instead of
-    copying + redrawing every idle loop (saves a full-frame copy + redraw).
-  - Keeps the window responsive (cv2 `waitKey` pumped even between new frames).
-- `main`: builds/stops the `VSyncClock`; in vsync mode pairs it with the cv2 presenter
-  to avoid two GLFW contexts contending; passes `--fullscreen` to the presenter.
+### 3.6 `Dockerfile` / `Makefile`
+- `Makefile`: `run-camera-lowlatency` target; `CAMERA_TRIGGER` (default `software`),
+  `VSYNC_DIVISOR` (default `1`), `EXPOSURE_US` (default empty = camera as-is),
+  `FULLSCREEN` (default `1`). vsync runs now assemble
+  `--camera-trigger vsync --presenter gl --fullscreen`.
+- `Dockerfile`: copies the five app modules (the earlier standalone `vsync.py` was
+  removed once superseded by the present-completion trigger).
 
-### 3.5 `display.py` — fullscreen low-latency presenter
-- `GLPresenter` gains a `fullscreen` mode:
-  - Real fullscreen window (unredirected by the compositor → **direct scanout**),
-    removing the 1–2 frames of compositor buffering that dominate desktop latency.
-  - `swap_interval(0)` (immediate present, lowest latency; may tear).
-- `create_presenter(..., fullscreen=...)` threads the option through.
-
-### 3.6 `Dockerfile`
-- Added `vsync.py` to the `COPY` layer (was missing → would have crashed
-  `run-camera-lowlatency` with `ModuleNotFoundError`).
-- Existing deps already cover it: `glfw`, `PyOpenGL`, and the GL/GLX runtime libs.
-
-### 3.7 `Makefile`
-- New target `run-camera-lowlatency` (low-latency capture + fullscreen + latency CSV).
-- New knobs: `CAMERA_TRIGGER` (default `software`), `VSYNC_DIVISOR`, `EXPOSURE_US`
-  (default `1000`), `FULLSCREEN` (default `1`).
 
 ---
 
 ## 4. How to run
 
+A single `run-camera` target; `LOWLATENCY=1` flips the low-latency profile, and
+individual knobs override it.
+
 ```bash
 make build
 
-# Low-latency (default: software trigger + fullscreen direct-scanout + latency CSV)
-make run-camera-lowlatency SERIAL=40067928
+# Baseline (free-running capture, windowed) — for comparison
+make run-camera SERIAL=<SERIAL_NUMBER>
+
+# Low-latency profile: software trigger + fullscreen direct-scanout + latency CSV
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1
+
+# Phase-locked (sticks to the bottom): capture driven by the fullscreen present's vblank
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1 CAMERA_TRIGGER=vsync
 
 # Variants
-make run-camera-lowlatency SERIAL=40067928 EXPOSURE_US=500     # shorter shutter (darker)
-make run-camera-lowlatency SERIAL=40067928 FULLSCREEN=0        # windowed
-make run-camera-lowlatency SERIAL=40067928 CAMERA_TRIGGER=vsync VSYNC_DIVISOR=2  # vblank-locked (needs working GLX_OML)
-
-# Baseline for comparison (original free-running capture)
-make run-camera SERIAL=40067928
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1 FULLSCREEN=0        # windowed
+make run-camera SERIAL=<SERIAL_NUMBER> LOWLATENCY=1 EXPOSURE_US=500     # shorter shutter (darker) — validate illumination
 ```
 
-The CSV streams to stdout; compare `trigger_to_display_ms` between `run-camera`
-(free-run) and `run-camera-lowlatency` to quantify the improvement.
+The CSV streams to stdout; compare `trigger_to_display_ms` between baseline and
+`LOWLATENCY=1` to quantify the improvement. Note this is a *relative* internal
+metric — it ends at frame hand-off and excludes present→GPU→scanout + exposure,
+so it reads lower than an Arduino photon-to-pixel rig.
 
 ---
 
@@ -151,6 +158,5 @@ Measured on the target setup (**60 Hz monitor, desktop compositor on**):
 
 ## 6. Files touched
 
-- Added: `vsync.py`
 - Modified: `app.py`, `config.py`, `sources.py`, `display.py`, `Dockerfile`, `Makefile`
 - Not ported (external tooling): `graph.py` (Arduino photon-to-pixel measurement rig)

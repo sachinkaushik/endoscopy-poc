@@ -5,8 +5,8 @@
 #
 #   make build
 #   make run-file      VIDEO=/abs/path/polyp_test.mp4
-#   make run-camera    SERIAL=40067928
-#   make run-camera-lowlatency SERIAL=40067928   # vblank-triggered, latency CSV
+#   make run-camera    SERIAL=<SERIAL_NUMBER>                 # baseline (free-running)
+#   make run-camera    SERIAL=<SERIAL_NUMBER> LOWLATENCY=1    # low-latency + fullscreen + CSV
 #   make run-webcam    DEVICE_INDEX=0
 #   make bench         VIDEO=/abs/path/polyp_test.mp4      # headless FPS
 #   make record        VIDEO=/abs/path/polyp_test.mp4
@@ -30,10 +30,22 @@ FRAME_SKIP   ?= 1
 THRESHOLD    ?= 0.5
 SERIAL       ?=                # Basler serial ("" = first camera)
 DEVICE_INDEX ?= 0              # V4L2 webcam index
-CAMERA_TRIGGER ?= software     # off | software | vsync (software = low-latency, no vblank clock)
-VSYNC_DIVISOR  ?= 2            # trigger every Nth vblank (vsync mode only)
-EXPOSURE_US    ?= 1000        # fixed exposure in us (lower = less latency + darker; "" = 2000 default)
-FULLSCREEN     ?= 1           # 1 = fullscreen GL direct-scanout (bypass compositor); 0 = windowed
+
+# LOWLATENCY=1 flips the whole low-latency profile in one switch (software trigger +
+# fullscreen direct-scanout + latency CSV). Individual knobs below still override it,
+# e.g. LOWLATENCY=1 CAMERA_TRIGGER=vsync, or LOWLATENCY=1 FULLSCREEN=0.
+LOWLATENCY   ?= 0
+ifeq ($(LOWLATENCY),1)
+CAMERA_TRIGGER ?= software     # off | software | vsync (vsync = phase-locked to display)
+FULLSCREEN     ?= 1            # fullscreen GL direct-scanout (bypass compositor)
+LATENCY_TRACE  ?= 1            # print per-stage latency CSV
+else
+CAMERA_TRIGGER ?= off          # free-running capture (baseline)
+FULLSCREEN     ?= 0            # windowed
+LATENCY_TRACE  ?= 0
+endif
+VSYNC_DIVISOR  ?= 1            # vsync: capture every Nth vblank (1=every refresh; raise only on >60Hz panels)
+EXPOSURE_US    ?=             # fixed exposure in us ("" = leave camera as-is; lower = less latency but darker)
 EXTRA        ?=                # extra flags, e.g. EXTRA="--frame-skip 2"
 
 # Proxy passthrough for build (optional)
@@ -76,18 +88,13 @@ run-file: _xhost ## Run on a video file (loops), with display
 		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
 
 .PHONY: run-camera
-run-camera: _xhost ## Run on a Basler live camera, with display
-	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
-		--source basler --source-arg "$(SERIAL)" \
-		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
-
-.PHONY: run-camera-lowlatency
-run-camera-lowlatency: _xhost ## Basler camera, low-latency capture + fullscreen + latency CSV
+run-camera: _xhost ## Basler live camera (add LOWLATENCY=1 for low-latency + fullscreen + CSV)
 	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
 		--source basler --source-arg "$(SERIAL)" \
 		--camera-trigger $(CAMERA_TRIGGER) --vsync-divisor $(VSYNC_DIVISOR) \
 		$(if $(EXPOSURE_US),--exposure-us $(EXPOSURE_US)) \
-		$(if $(filter-out 0,$(FULLSCREEN)),--presenter gl --fullscreen) --latency-trace \
+		$(if $(filter-out 0,$(FULLSCREEN)),--presenter gl --fullscreen) \
+		$(if $(filter-out 0,$(LATENCY_TRACE)),--latency-trace) \
 		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
 
 .PHONY: run-webcam

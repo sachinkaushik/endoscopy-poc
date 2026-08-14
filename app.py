@@ -40,7 +40,6 @@ from config import Config, parse_config
 from detector import Box, Detector
 from display import create_presenter
 from sources import Source, create_source
-from vsync import VSyncClock
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -74,6 +73,28 @@ class LatestDetections:
     def get(self) -> tuple[list[Box], int]:
         with self._lock:
             return list(self._boxes), self._ts_ns
+ 
+ 
+class PresentSignal:
+    """Present-completion tick. The (vsync-locked, fullscreen) presenter bumps the
+    sequence right after ``swap_buffers()`` returns from the vblank, and the capture
+    thread waits on it to fire the camera trigger — so exposure is phase-locked to the
+    real scanout in the SAME direct-scanout path (no separate GLFW context, no cv2)."""
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._seq = 0
+
+    def notify(self) -> None:
+        with self._cv:
+            self._seq += 1
+            self._cv.notify_all()
+
+    def wait(self, last_seq: int, timeout: float) -> int:
+        with self._cv:
+            if self._seq == last_seq:
+                self._cv.wait(timeout)
+            return self._seq
  
  
 class Rate:
@@ -128,32 +149,24 @@ def _put_latest(q: "queue.Queue", item) -> None:  # noqa: ANN001
 
 
 def capture_loop(cfg: Config, src: Source, display_q, infer_q, cap_rate: Rate,
-                 clock: VSyncClock | None = None) -> None:  # noqa: ANN001
+                 present: PresentSignal | None = None) -> None:  # noqa: ANN001
     _pin(cfg.cpu_capture, cfg.rt_priority, "capture")
     frame_interval = 1.0 / src.fps if (not src.is_live and src.fps > 0) else 0.0
     n = 0
     next_t = time.monotonic()
-    last_msc = -1
-    clock_stalls = 0
+    last_seq = 0
+    present_count = 0
     while not shutdown.is_set():
-        # vsync mode: wait for the monitor vblank, then trigger every Nth tick so
-        # exposure is phase-locked to the display refresh (reference behaviour).
-        if clock is not None:
-            tick = clock.wait(last_msc, timeout=0.25)
-            if tick is None:
-                # Clock not delivering vblanks (compositor/driver without working
-                # GLX_OML). Don't limp at the timeout cadence — disable vblank
-                # pacing and fall through to full-rate on-demand triggering.
-                clock_stalls += 1
-                if clock_stalls >= 3:
-                    log.warning("vsync clock not advancing — disabling vblank pacing, "
-                                "using full-rate on-demand trigger")
-                    clock = None
-                continue
-            clock_stalls = 0
-            last_msc = tick[0]
-            if last_msc % cfg.vsync_divisor != 0:
-                continue
+        # vsync mode: block until the fullscreen presenter completes a vblank swap,
+        # then trigger — exposure is phase-locked to the actual scanout. The 0.1s
+        # timeout self-primes at startup and keeps capture alive if presents stall.
+        if present is not None:
+            seq = present.wait(last_seq, timeout=0.1)
+            if seq != last_seq:  # a real vblank present happened
+                last_seq = seq
+                present_count += 1
+                if present_count % cfg.vsync_divisor != 0:
+                    continue
         t_trigger = time.perf_counter_ns()
         frame = src.read()
         t_grab = time.perf_counter_ns()
@@ -169,7 +182,7 @@ def capture_loop(cfg: Config, src: Source, display_q, infer_q, cap_rate: Rate,
         if n % cfg.frame_skip == 0:
             _put_latest(infer_q, pkt)
         # Pace file playback to its native FPS (live sources self-pace).
-        if frame_interval and clock is None:
+        if frame_interval and present is None:
             next_t += frame_interval
             sleep = next_t - time.monotonic()
             if sleep > 0:
@@ -196,7 +209,7 @@ def inference_loop(cfg: Config, det: Detector, infer_q, latest: LatestDetections
  
  
 def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
-                 cap_rate: Rate, inf_rate: Rate) -> None:  # noqa: ANN001
+                 cap_rate: Rate, inf_rate: Rate, present: PresentSignal | None = None) -> None:  # noqa: ANN001
     _pin(cfg.cpu_display, cfg.rt_priority, "display")
     writer = None
     if cfg.record_path:
@@ -204,9 +217,12 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
         fps = src.fps if src.fps > 0 else 30.0
         writer = cv2.VideoWriter(cfg.record_path, fourcc, fps, (src.width, src.height))
         log.info("recording annotated output -> %s", cfg.record_path)
- 
+
+    # vsync trigger needs a vblank-locked present to drive capture; free-run + fullscreen
+    # wants immediate (swap_interval 0) present for lowest latency.
+    vsync_lock = (cfg.camera_trigger == "vsync") or (not cfg.fullscreen)
     presenter = create_presenter(cfg.headless, cfg.presenter, src.width, src.height,
-                                 cfg.display_scale, cfg.fullscreen)
+                                 cfg.display_scale, cfg.fullscreen, vsync_lock)
     vsync = getattr(presenter, "vsync", False)
 
     ttl_ns = cfg.detection_ttl_ms * 1_000_000
@@ -263,6 +279,11 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
         if presenter is not None:
             if not presenter.present(annotated):  # GL vsync: blocks until vblank; ESC/close -> False
                 shutdown.set()
+        # Present-completion trigger: the present just returned — release the capture
+        # thread to expose in phase with it. When the presenter is vsync-locked GL,
+        # this edge is the real vblank (phase-lock); on a cv2 fallback it's best-effort.
+        if present is not None:
+            present.notify()
         # Idle pacing for the non-vsync path when no fresh frame arrived, so we
         # don't spin at 100% CPU while still keeping the window alive.
         if new is None and not vsync:
@@ -301,34 +322,38 @@ def main(argv: list[str] | None = None) -> int:
     src = create_source(cfg)
     log.info("source: %s %dx%d fps=%.1f live=%s", src.name, src.width, src.height, src.fps, src.is_live)
 
-    # vsync trigger mode: start the GLX_OML vblank clock and drive capture off it.
-    # It owns its own GLFW context, so pair it with the cv2 presenter to avoid two
-    # GLFW contexts contending (the camera is already refresh-locked here anyway).
-    clock: VSyncClock | None = None
+    # vsync trigger: phase-lock capture to the display via the presenter's own
+    # vblank (present-completion). One fullscreen, vsync-locked GL path does both
+    # the direct-scanout present AND the capture timing — no separate GLFW clock,
+    # no cv2 detour back through the compositor.
+    present: PresentSignal | None = None
     if cfg.camera_trigger == "vsync":
-        clock = VSyncClock()
-        if not clock.start():
-            log.warning("vsync clock unavailable — falling back to on-demand software trigger")
-            clock = None
-        elif cfg.presenter in ("auto", "gl"):
-            log.info("vsync trigger active — using cv2 presenter (camera drives the cadence)")
-            cfg.presenter = "cv2"
+        present = PresentSignal()
+        if cfg.presenter == "auto":
+            cfg.presenter = "gl"  # cv2 can't vblank-lock; GL is required for phase-lock
+        if cfg.presenter == "cv2":
+            log.warning("vsync trigger with cv2 presenter is NOT vblank-locked "
+                        "(compositor in path) — use --presenter gl --fullscreen")
+        elif not cfg.fullscreen:
+            log.warning("vsync trigger without --fullscreen keeps the compositor in the "
+                        "present path — add --fullscreen for direct scanout")
 
     display_q: "queue.Queue[Captured]" = queue.Queue(maxsize=2)
     infer_q: "queue.Queue[Captured]" = queue.Queue(maxsize=1)
     latest = LatestDetections()
     cap_rate, inf_rate = Rate(), Rate()
 
-    threading.Thread(target=capture_loop, args=(cfg, src, display_q, infer_q, cap_rate, clock),
+    threading.Thread(target=capture_loop, args=(cfg, src, display_q, infer_q, cap_rate, present),
                      name="capture", daemon=True).start()
     threading.Thread(target=inference_loop, args=(cfg, det, infer_q, latest, inf_rate),
                      name="inference", daemon=True).start()
     try:
-        display_loop(cfg, src, display_q, latest, cap_rate, inf_rate)  # main thread (cv2 highgui)
+        display_loop(cfg, src, display_q, latest, cap_rate, inf_rate, present)  # main thread
     finally:
         shutdown.set()
-        if clock is not None:
-            clock.stop()
+        # Wake a capture thread that may be blocked waiting on the next present.
+        if present is not None:
+            present.notify()
         time.sleep(0.2)
         src.close()
     return 0
