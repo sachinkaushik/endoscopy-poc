@@ -180,20 +180,20 @@ before/after comparison, not as an absolute figure.
 ## Run locally (without Docker)
 
 ```bash
-pip install -r requirements.txt
+pip install -r src/requirements.txt
 # live Basler camera only:
 pip install pypylon
 ```
 
 ```bash
 # Video file (loops)
-python app.py --source file --source-arg /videos/polyp_test.mp4 --device GPU
+python src/app.py --source file --source-arg /videos/polyp_test.mp4 --device GPU
 
 # Basler live camera (first camera; or pass a serial)
-python app.py --source basler --source-arg <SERIAL_NUMBER> --device GPU
+python src/app.py --source basler --source-arg <SERIAL_NUMBER> --device GPU
 
 # USB / V4L2 webcam (device index)
-python app.py --source v4l2 --source-arg 0 --device GPU
+python src/app.py --source v4l2 --source-arg 0 --device GPU
 ```
 
 Press **ESC** to quit.
@@ -229,7 +229,7 @@ Portable by default (no affinity). Enable per-thread only where the platform
 topology is known:
 
 ```bash
-python app.py --source basler \
+python src/app.py --source basler \
   --cpu-capture 4 --cpu-inference 6 --cpu-display 7 --rt-priority 80
 ```
 
@@ -256,13 +256,15 @@ falls back to normal scheduling if not permitted.
 
 ```
 updated-endoscopy-demo/
-├── app.py           # threads (capture / inference / display), HUD, record
-├── detector.py      # OpenVINO IR load, letterbox preprocess, YOLO decode + NMS
-├── sources.py       # FileSource / V4L2Source / BaslerSource + factory
-├── display.py       # vsync OpenGL presenter + cv2 fallback + factory
-├── config.py        # CLI + env configuration
-├── requirements.txt
-└── README.md
+├── src/
+│   ├── app.py           # threads (capture / inference / display), HUD, record
+│   ├── detector.py      # OpenVINO IR load, letterbox preprocess, YOLO decode + NMS
+│   ├── sources.py       # FileSource / V4L2Source / BaslerSource + factory
+│   ├── display.py       # vsync OpenGL presenter + cv2 fallback + factory
+│   ├── config.py        # CLI + env configuration
+│   └── requirements.txt
+└── docs/
+  └── README.md
 ```
 
 > Research/reference implementation for evaluating Intel inference performance —

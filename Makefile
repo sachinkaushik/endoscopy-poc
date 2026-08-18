@@ -1,21 +1,20 @@
-# Updated Endoscopy Demo — standalone build/run.
+# Updated Endoscopy Demo — docker compose driven workflow.
 #
 # Independent of the rest of Surgical_Instrument. Just needs an OpenVINO IR and
 # (for file mode) a video, mounted from the host.
 #
-#   make build
-#   make run-file      VIDEO=/abs/path/polyp_test.mp4
-#   make run-camera    SERIAL=<SERIAL_NUMBER>                 # baseline (free-running)
-#   make run-camera    SERIAL=<SERIAL_NUMBER> LOWLATENCY=1    # low-latency + fullscreen + CSV
-#   make run-webcam    DEVICE_INDEX=0
-#   make bench         VIDEO=/abs/path/polyp_test.mp4      # headless FPS
-#   make record        VIDEO=/abs/path/polyp_test.mp4
-#   make shell
+#   make up LOWLATENCY=1 CAMERA_TRIGGER=vsync VSYNC_DIVISOR=2 SERIAL=<SERIAL_NUMBER>
+#   make up LOWLATENCY=1 CAMERA_TRIGGER=vsync VSYNC_DIVISOR=2 SERIAL=<SERIAL_NUMBER> REGISTRY=false
+#   make down
+#   make logs
 #
 SHELL := /bin/bash
 
 IMAGE        ?= endoscopy-demo:latest
 CONTAINER    ?= endoscopy-demo
+TAG          ?= latest
+REGISTRY     ?= true
+REGISTRY_URL ?= intel/
 
 # --- Host paths mounted into the container -----------------------------------
 # MODELS_DIR must contain: yolo11n_polyp/best_openvino_model/best.xml
@@ -25,33 +24,53 @@ VIDEO        ?= /videos/polyp_test.mp4      # container-side path
 MODEL        ?= /models/yolo11n_polyp/best_openvino_model/best.xml
 
 # --- Runtime knobs -----------------------------------------------------------
-DEVICE       ?= GPU            # CPU | GPU | NPU
+# CPU | GPU | NPU
+DEVICE       ?= GPU
 FRAME_SKIP   ?= 1
 THRESHOLD    ?= 0.5
-SERIAL       ?=                # Basler serial ("" = first camera)
-DEVICE_INDEX ?= 0              # V4L2 webcam index
+# Basler serial ("" = first camera)
+SERIAL       ?=
+# V4L2 webcam index
+DEVICE_INDEX ?= 0
 
 # LOWLATENCY=1 flips the whole low-latency profile in one switch (software trigger +
 # fullscreen direct-scanout + latency CSV). Individual knobs below still override it,
 # e.g. LOWLATENCY=1 CAMERA_TRIGGER=vsync, or LOWLATENCY=1 FULLSCREEN=0.
-LOWLATENCY   ?= 0
+LOWLATENCY   ?= 1
 ifeq ($(LOWLATENCY),1)
-CAMERA_TRIGGER ?= software     # off | software | vsync (vsync = phase-locked to display)
-FULLSCREEN     ?= 1            # fullscreen GL direct-scanout (bypass compositor)
-LATENCY_TRACE  ?= 1            # print per-stage latency CSV
+# off | software | vsync (vsync = phase-locked to display)
+CAMERA_TRIGGER ?= vsync
+# fullscreen GL direct-scanout (bypass compositor)
+FULLSCREEN     ?= 1
+# print per-stage latency CSV
+LATENCY_TRACE  ?= 1
 else
-CAMERA_TRIGGER ?= off          # free-running capture (baseline)
-FULLSCREEN     ?= 0            # windowed
+# free-running capture (baseline)
+CAMERA_TRIGGER ?= off
+# windowed
+FULLSCREEN     ?= 0
 LATENCY_TRACE  ?= 0
 endif
-VSYNC_DIVISOR  ?= 1            # vsync: capture every Nth vblank (1=every refresh; raise only on >60Hz panels)
-EXPOSURE_US    ?=             # fixed exposure in us ("" = leave camera as-is; lower = less latency but darker)
-EXTRA        ?=                # extra flags, e.g. EXTRA="--frame-skip 2"
+# vsync: capture every Nth vblank
+VSYNC_DIVISOR  ?= 2
+# fixed exposure in us ("" = leave camera as-is; lower = less latency but darker)
+EXPOSURE_US    ?=
+# extra flags, e.g. EXTRA="--frame-skip 2"
+EXTRA          ?=
 
 # Proxy passthrough for build (optional)
 HTTP_PROXY   ?=
 HTTPS_PROXY  ?=
 NO_PROXY     ?=
+
+COMPOSE      := docker compose --project-directory . -f docker/docker-compose.yaml
+REGISTRY_LOWER := $(shell echo $(REGISTRY) | tr A-Z a-z)
+
+# Unified compose runtime selector:
+#   SOURCE=file|camera|webcam|basler|v4l2
+# Keep SOURCE_ARG explicit when passing file path/serial/index directly.
+SOURCE       ?= camera
+SOURCE_ARG   ?=
 
 # --- Host GPU/USB plumbing (auto-detected) -----------------------------------
 RENDER_GID   := $(shell getent group render | cut -d: -f3)
@@ -69,56 +88,14 @@ COMMON       := --rm --name $(CONTAINER) --net=host $(DRI) $(GROUP_ARGS) $(MOUNT
                 --cap-add SYS_NICE --ulimit rtprio=99 \
                 -e MODEL=$(MODEL) -e DEVICE=$(DEVICE)
 
-.PHONY: build
-build: ## Build the standalone image
-	docker build \
-		--build-arg HTTP_PROXY=$(HTTP_PROXY) \
-		--build-arg HTTPS_PROXY=$(HTTPS_PROXY) \
-		--build-arg NO_PROXY=$(NO_PROXY) \
-		-t $(IMAGE) .
-
 .PHONY: _xhost
 _xhost:
 	@xhost +local:root >/dev/null 2>&1 || true
 
-.PHONY: run-file
-run-file: _xhost ## Run on a video file (loops), with display
-	docker run $(COMMON) $(X11) $(IMAGE) \
-		--source file --source-arg $(VIDEO) \
-		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
-
-.PHONY: run-camera
-run-camera: _xhost ## Basler live camera (add LOWLATENCY=1 for low-latency + fullscreen + CSV)
-	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
-		--source basler --source-arg "$(SERIAL)" \
-		--camera-trigger $(CAMERA_TRIGGER) --vsync-divisor $(VSYNC_DIVISOR) \
-		$(if $(EXPOSURE_US),--exposure-us $(EXPOSURE_US)) \
-		$(if $(filter-out 0,$(FULLSCREEN)),--presenter gl --fullscreen) \
-		$(if $(filter-out 0,$(LATENCY_TRACE)),--latency-trace) \
-		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
-
-.PHONY: run-webcam
-run-webcam: _xhost ## Run on a USB/V4L2 webcam, with display
-	docker run $(COMMON) $(X11) $(USB) $(IMAGE) \
-		--source v4l2 --source-arg $(DEVICE_INDEX) \
-		--threshold $(THRESHOLD) --frame-skip $(FRAME_SKIP) $(EXTRA)
-
-.PHONY: bench
-bench: ## Headless FPS benchmark on a video file (no display)
-	docker run $(COMMON) $(IMAGE) \
-		--source file --source-arg $(VIDEO) --headless \
-		--frame-skip $(FRAME_SKIP) $(EXTRA)
-
-.PHONY: record
-record: ## Write an annotated clip to $(VIDEOS_DIR)/annotated.mp4
-	docker run $(COMMON) $(IMAGE) \
-		--source file --source-arg $(VIDEO) --headless \
-		--record /videos/annotated.mp4 $(EXTRA)
-
 .PHONY: list-cameras
 list-cameras: ## List connected Basler cameras (serial + model) -> SERIAL=
-	@python3 utility.py 2>/dev/null || \
-	docker run --rm $(USB) -v $(CURDIR)/utility.py:/tmp/utility.py:ro \
+	@python3 src/utility.py 2>/dev/null || \
+	docker run --rm $(USB) -v $(CURDIR)/src/utility.py:/tmp/utility.py:ro \
 		--entrypoint python3 $(IMAGE) /tmp/utility.py
 
 .PHONY: show-cores
@@ -140,18 +117,38 @@ show-cores: ## Show P-core / E-core CPU sets for --cpu-* pinning
 	lscpu -e 2>/dev/null | head -7 || lscpu | head -10; \
 	printf '\n'
 
-.PHONY: shell
-shell: ## Interactive shell in the image
-	docker run $(COMMON) $(X11) $(USB) --entrypoint bash -it $(IMAGE)
+.PHONY: up
+up: _xhost ## Start stack for all variations (SOURCE=file|camera|webcam, REGISTRY=true/false)
+	@SRC="$(SOURCE)"; \
+	ARG="$(SOURCE_ARG)"; \
+	if [ "$$SRC" = "camera" ]; then SRC="basler"; ARG="$(SERIAL)"; fi; \
+	if [ "$$SRC" = "webcam" ]; then SRC="v4l2"; ARG="$(DEVICE_INDEX)"; fi; \
+	CAMERA_TRIGGER="$(CAMERA_TRIGGER)"; \
+	if [ "$(REGISTRY_LOWER)" = "true" ]; then \
+		echo "Pulling image from registry: $(REGISTRY_URL)hls-si-endoscopy:$(TAG)"; \
+		DOCKER_REGISTRY=$(REGISTRY_URL) TAG=$(TAG) $(COMPOSE) pull; \
+	else \
+		echo "Building image from local source"; \
+		TAG=$(TAG) $(COMPOSE) build; \
+	fi; \
+	DOCKER_REGISTRY=$(REGISTRY_URL) TAG=$(TAG) \
+	SOURCE="$$SRC" SOURCE_ARG="$$ARG" CAMERA_TRIGGER="$$CAMERA_TRIGGER" \
+	FULLSCREEN="$(FULLSCREEN)" LATENCY_TRACE="$(LATENCY_TRACE)" \
+	VSYNC_DIVISOR="$(VSYNC_DIVISOR)" EXPOSURE_US="$(EXPOSURE_US)" \
+	$(COMPOSE) up -d
 
-.PHONY: stop
-stop: ## Stop a running container
-	-docker rm -f $(CONTAINER) 2>/dev/null || true
-	@xhost -local:root >/dev/null 2>&1 || true
+.PHONY: down
+down: ## Stop compose stack
+	DOCKER_REGISTRY=$(REGISTRY_URL) TAG=$(TAG) $(COMPOSE) down
+
+.PHONY: logs
+logs: ## Tail compose logs
+	DOCKER_REGISTRY=$(REGISTRY_URL) TAG=$(TAG) $(COMPOSE) logs -f
 
 .PHONY: clean
-clean: stop ## Remove the image
-	-docker rmi $(IMAGE) 2>/dev/null || true
+clean: down ## Stop stack and remove image
+	-docker rmi intel/hls-si-endoscopy:$(TAG) 2>/dev/null || true
+	@xhost -local:root >/dev/null 2>&1 || true
 
 .PHONY: help
 help: ## List targets
