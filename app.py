@@ -232,13 +232,27 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
               "trigger_to_display_ms,infer_ms,disp_fps,cap_fps")
 
     while not shutdown.is_set():
-        # Drain the queue to the newest frame (newest-frame-wins).
+        # Get the newest frame with zero polling jitter. On the cv2 show-on-arrival
+        # path we BLOCK until a frame lands (wake the instant capture delivers it),
+        # then drain any extras to the newest -- exactly what the reference does.
+        # Polling here (get_nowait + sleep) added ~1-2ms of variable latency that,
+        # against the 120Hz vblank, occasionally pushed a frame past its deadline
+        # (a 1-frame slip). A vsync-locked GL presenter instead must re-present every
+        # vblank, so it drains non-blocking and never waits on the queue.
         new = None
-        try:
-            while True:
-                new = display_q.get_nowait()
-        except queue.Empty:
-            pass
+        if vsync:
+            try:
+                while True:
+                    new = display_q.get_nowait()
+            except queue.Empty:
+                pass
+        else:
+            try:
+                new = display_q.get(timeout=0.1)  # block: wake the instant a frame lands
+                while True:                        # then keep only the newest
+                    new = display_q.get_nowait()
+            except queue.Empty:
+                pass
         if new is not None:
             last_pkt = new
 
@@ -275,10 +289,6 @@ def display_loop(cfg: Config, src: Source, display_q, latest: LatestDetections,
         if presenter is not None:
             if not presenter.present(annotated):  # ESC / window close -> False
                 shutdown.set()
-        # Idle pacing for the non-vsync path when no fresh frame arrived, so we
-        # don't spin at 100% CPU while still keeping the window alive.
-        if new is None and not vsync:
-            time.sleep(0.001)
 
         # Per-stage photon-to-pixel latency, measured only on genuinely new frames.
         if cfg.latency_trace and new is not None:
